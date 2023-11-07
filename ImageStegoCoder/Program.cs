@@ -156,6 +156,7 @@ namespace ImageStegoCoder
                         int newY = (y + j) % outImageWritten.GetLength(1);
                         if (!outImageWritten[newX, newY])
                         {
+                            Console.WriteLine("Hit! (" + x + "/" + y + ") -> (" + newX + "/" + newY + ")";
                             x = newX;
                             y = newY;
                             goto Foo;
@@ -300,7 +301,8 @@ namespace ImageStegoCoder
                         int newY = (y + j) % outImageRead.GetLength(1);
                         if (!outImageRead[newX, newY])
                         {
-                            x = newX;
+
+                            Console.WriteLine("Hit! (" + x + "/" + y + ") -> (" + newX + "/" + newY + ")";           x = newX;
                             y = newY;
                             goto Foo;
                         }
