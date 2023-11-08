@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Xml;
 using SkiaSharp;
 
 namespace ImageStegoCoder
@@ -15,6 +16,7 @@ namespace ImageStegoCoder
             bool decode = false;
             bool encode = false;
             bool test = false;
+            EncodeMode mode = EncodeMode.Differential;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -38,26 +40,42 @@ namespace ImageStegoCoder
                     case "--test":
                         test = true;
                         break;
+                    case "--mode":
+                        object? newMode;
+                        bool succeed = Enum.TryParse(typeof(EncodeMode), args[i + 1], true, out newMode);
+                        if (succeed && newMode != null)
+                            mode = (EncodeMode)newMode;
+                        break;
                     default:
                         break;
                 }
             }
 
-            if (firstImagePath == null || secondImagePath == null || dataFilePath == null || (!decode && !encode) || (decode && encode))
+            bool needHelp = false;
+            if (firstImagePath == null)
+                needHelp = true;
+            if (secondImagePath == null && mode == EncodeMode.Differential)
+                needHelp = true;
+            if (dataFilePath == null)
+                needHelp = true;
+            if (!test && ((decode && encode) || (!decode && !encode)))
+                needHelp = true;
+
+            if (needHelp)
             {
-                if (!test)
-                {
-                    Console.WriteLine("Invalid Arguments");
-                    Console.WriteLine("Argument Options:");
-                    Console.WriteLine("    --first-image");
-                    Console.WriteLine("    --second-image");
-                    Console.WriteLine("    --data-file");
-                    Console.WriteLine("    --encode");
-                    Console.WriteLine("    --decode");
-                    Console.WriteLine("    --test");
-                    return;
-                }
+                Console.WriteLine("Invalid Arguments");
+                Console.WriteLine("Argument Options:");
+                Console.WriteLine("    --first-image");
+                Console.WriteLine("    --second-image");
+                Console.WriteLine("    --data-file");
+                Console.WriteLine("    --encode");
+                Console.WriteLine("    --decode");
+                Console.WriteLine("    --mode");
+                Console.WriteLine("    --test");
+                return;
             }
+
+            Console.WriteLine("Encoding Mode: " + mode.ToString());
 
             if (test)
             {
@@ -84,19 +102,25 @@ namespace ImageStegoCoder
                 {
                     for (int j = 0; j < encodedColors.GetLength(1); j++)
                     {
-                        encodedColors[i, j] = Converter.ByteEncode(sourceColors[i, j], inBytes[i * width + j]);
+                        if (mode == EncodeMode.Differential)
+                            encodedColors[i, j] = Converter.ByteEncode(sourceColors[i, j], inBytes[i * width + j]);
+                        else
+                            encodedColors[i, j] = Converter.ByteEncodeOverwrite(sourceColors[i, j], inBytes[i * width + j]);
                     }
                 }
 
-                SKBitmap bitmap = Converter.ColorsToBitmap(encodedColors, new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Opaque));
-                encodedColors = Converter.BitmapToColors(bitmap);
+                //SKBitmap bitmap = Converter.ColorsToBitmap(encodedColors, new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul));
+                //encodedColors = Converter.BitmapToColors(bitmap);
 
                 byte[] outBytes = new byte[width * height];
                 for (int i = 0; i < encodedColors.GetLength(0); i++)
                 {
                     for (int j = 0; j < encodedColors.GetLength(1); j++)
                     {
-                        outBytes[i * width + j] = Converter.ByteDecode(sourceColors[i, j], encodedColors[i, j]);
+                        if (mode == EncodeMode.Differential)
+                            outBytes[i * width + j] = Converter.ByteDecode(sourceColors[i, j], encodedColors[i, j]);
+                        else
+                            outBytes[i * width + j] = Converter.ByteDecodeOverwrite(encodedColors[i, j]);
                     }
                 }
 
@@ -117,7 +141,7 @@ namespace ImageStegoCoder
 
             if (encode)
             {
-                ImageEncoder encoder = new ImageEncoder();
+                ImageEncoder encoder = new ImageEncoder(mode);
                 encoder.LoadSourceImage(firstImagePath);
                 encoder.LoadIputData(dataFilePath);
                 encoder.WriteOutImage(secondImagePath);
@@ -125,9 +149,16 @@ namespace ImageStegoCoder
 
             if (decode)
             {
-                ImageDecoder decoder = new ImageDecoder();
-                decoder.LoadSourceImage(firstImagePath);
-                decoder.LoadOutputImage(secondImagePath);
+                ImageDecoder decoder = new ImageDecoder(mode);
+                if (mode == EncodeMode.Differential)
+                {
+                    decoder.LoadSourceImage(firstImagePath);
+                    decoder.LoadOutputImage(secondImagePath);
+                }
+                else
+                {
+                    decoder.LoadOutputImage(firstImagePath);
+                }
                 decoder.WriteOutData(dataFilePath);
             }
         }
@@ -141,6 +172,7 @@ namespace ImageStegoCoder
         private RandomWrapper randomGenerator;
         private byte[] dataBytes;
         private SKImageInfo imageInfo;
+        private EncodeMode encodeMode;
 
         private bool loadedSource;
         private bool loadedData;
@@ -160,7 +192,7 @@ namespace ImageStegoCoder
             new int[] { 1, 2 }
         };
 
-        public ImageEncoder()
+        public ImageEncoder(EncodeMode mode)
         {
             sourceImageColors = new SKColor[0, 0];
             outImageColors = new SKColor[0, 0];
@@ -168,6 +200,7 @@ namespace ImageStegoCoder
             randomGenerator = new RandomWrapper();
             dataBytes = new byte[0];
             imageInfo = new SKImageInfo();
+            encodeMode = mode;
 
             loadedSource = false;
             loadedData = false;
@@ -181,6 +214,11 @@ namespace ImageStegoCoder
             //SKBitmap bitmap = SKBitmap.Decode(sourceImagePath);
             SKBitmap bitmap = SKBitmap.Decode(sourceImagePath);
             imageInfo = bitmap.Info;
+            //Console.WriteLine("Image Info: " + imageInfo);
+            //Console.WriteLine("Image Alpha Type: " + imageInfo.AlphaType);
+            //Console.WriteLine("Image Color Type: " + imageInfo.ColorType);
+            //Console.WriteLine("Image Color Space: " + imageInfo.ColorSpace);
+
             sourceImageColors = Converter.BitmapToColors(bitmap);
             //outImageColors = new SKColor[sourceImageColors.GetLength(0), sourceImageColors.GetLength(1)];
             outImageColors = Converter.BitmapToColors(bitmap);
@@ -190,7 +228,7 @@ namespace ImageStegoCoder
 
         public void LoadIputData(string inputFilePath)
         {
-            if (!loadedSource)
+            if (!loadedSource && encodeMode == EncodeMode.Differential)
                 throw new Exception("Source Data has to be loaded before Input Data");
 
             byte[] bytes = FileUtility.ReadFile(inputFilePath);
@@ -235,7 +273,17 @@ namespace ImageStegoCoder
             }
             Foo:
             outImageWritten[x, y] = true;
-            outImageColors[x, y] = Converter.ByteEncode(sourceImageColors[x, y], b);
+            switch (encodeMode)
+            {
+                case EncodeMode.Differential:
+                    outImageColors[x, y] = Converter.ByteEncode(sourceImageColors[x, y], b);
+                    break;
+                case EncodeMode.Overwrite:
+                    outImageColors[x, y] = Converter.ByteEncodeOverwrite(sourceImageColors[x, y], b);
+                    break;
+                default:
+                    break;
+            }
         }
 
         private void EncodeImage()
@@ -299,6 +347,7 @@ namespace ImageStegoCoder
         private RandomWrapper randomGenerator;
         private byte[] dataBytes;
         private SKImageInfo imageInfo;
+        private EncodeMode encodeMode;
 
         private bool loadedSource;
         private bool loadedOutput;
@@ -318,7 +367,7 @@ namespace ImageStegoCoder
             new int[] { 1, 2 }
         };
 
-        public ImageDecoder()
+        public ImageDecoder(EncodeMode mode)
         {
             sourceImageColors = new SKColor[0, 0];
             outImageColors = new SKColor[0, 0];
@@ -326,6 +375,7 @@ namespace ImageStegoCoder
             randomGenerator = new RandomWrapper();
             dataBytes = new byte[0];
             imageInfo = new SKImageInfo();
+            encodeMode = mode;
 
             loadedSource = false;
             loadedOutput = false;
@@ -345,7 +395,7 @@ namespace ImageStegoCoder
 
         public void LoadOutputImage(string outputImagePath)
         {
-            if (!loadedSource)
+            if (!loadedSource && encodeMode == EncodeMode.Differential)
                 throw new Exception("Source Image has to be loaded before Output Image");
 
             //MemoryStream stream = new MemoryStream();
@@ -353,11 +403,14 @@ namespace ImageStegoCoder
             //SKBitmap bitmap = SKBitmap.Decode(stream);
             SKBitmap bitmap = SKBitmap.Decode(outputImagePath);
 
-            if (bitmap.Width != sourceImageColors.GetLength(0) || bitmap.Height != sourceImageColors.GetLength(1))
+            if (encodeMode == EncodeMode.Differential)
+                if (bitmap.Width != sourceImageColors.GetLength(0) || bitmap.Height != sourceImageColors.GetLength(1))
                 throw new Exception("Images are not the same size");
+            else
+                imageInfo = bitmap.Info;
 
             outImageColors = Converter.BitmapToColors(bitmap);
-            outImageRead = new bool[sourceImageColors.GetLength(0), sourceImageColors.GetLength(1)];
+            outImageRead = new bool[outImageColors.GetLength(0), outImageColors.GetLength(1)];
             loadedOutput = true;
 
             //SKImage image = SKImage.FromBitmap(Converter.ColorsToBitmap(outImageColors));
@@ -395,7 +448,20 @@ namespace ImageStegoCoder
             }
             Foo:
             outImageRead[x, y] = true;
-            return Converter.ByteDecode(sourceImageColors[x, y], outImageColors[x, y]);
+            byte b;
+            switch (encodeMode)
+            {
+                case EncodeMode.Differential:
+                    b = Converter.ByteDecode(sourceImageColors[x, y], outImageColors[x, y]);
+                    break;
+                case EncodeMode.Overwrite:
+                    b = Converter.ByteDecodeOverwrite(outImageColors[x, y]);
+                    break;
+                default:
+                    b = 0;
+                    break;
+            }
+            return b;
         }
 
         private void DecodeImage()
@@ -544,6 +610,35 @@ namespace ImageStegoCoder
             return b;
         }
 
+        public static SKColor ByteEncodeOverwrite(SKColor inColor, byte b)
+        {
+            byte[] bytes = new byte[]
+            {
+                (byte)(b & 0b_0000_0111),
+                (byte)((b & 0b_0001_1000) >> 3),
+                (byte)((b & 0b_1110_0000) >> 5)
+            };
+            SKColor outColor = new SKColor(
+                (byte)((inColor.Red & ~0b_0000_0111) | bytes[0]),
+                (byte)((inColor.Green & ~0b_0000_0011) | bytes[1]),
+                (byte)((inColor.Blue & ~0b_0000_0111) | bytes[2]),
+                inColor.Alpha
+                );
+            return outColor;
+        }
+
+        public static byte ByteDecodeOverwrite(SKColor outColor)
+        {
+            byte[] bytes = new byte[]
+            {
+                (byte)(outColor.Red & 0b_0000_0111),
+                (byte)((outColor.Green & 0b_0000_011) << 3),
+                (byte)((outColor.Blue & 0b_0000_0111) << 5)
+            };
+            byte b = (byte)(bytes[0] | bytes[1] | bytes[2]);
+            return b;
+        }
+
         public static byte[] ToByteArray(int value)
         {
             byte mask = 0b_1111_1111;
@@ -678,5 +773,11 @@ namespace ImageStegoCoder
             byte[] hash = SHA256.Create().ComputeHash(arrInput);
             return ByteArrayToString(hash);
         }
+    }
+
+    public enum EncodeMode
+    {
+        Differential,
+        Overwrite
     }
 }
