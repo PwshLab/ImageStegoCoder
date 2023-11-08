@@ -1,4 +1,6 @@
-﻿using System.Security.Cryptography;
+﻿using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using SkiaSharp;
 
 namespace ImageStegoCoder
@@ -12,6 +14,7 @@ namespace ImageStegoCoder
             string? dataFilePath = null;
             bool decode = false;
             bool encode = false;
+            bool test = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -32,6 +35,9 @@ namespace ImageStegoCoder
                     case "--decode":
                         decode = true;
                         break;
+                    case "--test":
+                        test = true;
+                        break;
                     default:
                         break;
                 }
@@ -39,13 +45,73 @@ namespace ImageStegoCoder
 
             if (firstImagePath == null || secondImagePath == null || dataFilePath == null || (!decode && !encode) || (decode && encode))
             {
-                Console.WriteLine("Invalid Arguments");
-                Console.WriteLine("Argument Options:");
-                Console.WriteLine("    --first-image");
-                Console.WriteLine("    --second-image");
-                Console.WriteLine("    --data-file");
-                Console.WriteLine("    --encode");
-                Console.WriteLine("    --decode");
+                if (!test)
+                {
+                    Console.WriteLine("Invalid Arguments");
+                    Console.WriteLine("Argument Options:");
+                    Console.WriteLine("    --first-image");
+                    Console.WriteLine("    --second-image");
+                    Console.WriteLine("    --data-file");
+                    Console.WriteLine("    --encode");
+                    Console.WriteLine("    --decode");
+                    Console.WriteLine("    --test");
+                    return;
+                }
+            }
+
+            if (test)
+            {
+                int width = 256, height = 256;
+                RandomWrapper rand = new RandomWrapper();
+                byte[] inBytes = new byte[width * height];
+                rand.NextBytes(inBytes);
+                string hash1 = Hashing.Sha256(inBytes);
+                Console.WriteLine("In  Data Hash: " + hash1);
+
+                SKColor[,] sourceColors = new SKColor[width, height];
+                for (int i = 0; i < sourceColors.GetLength(0); i++)
+                {
+                    SKColor[] colors = new SKColor[sourceColors.GetLength(1)];
+                    rand.NextColors(colors);
+                    for (int j = 0; j < colors.Length; j++)
+                    {
+                        sourceColors[i, j] = colors[j];
+                    }
+                }
+ 
+                SKColor[,] encodedColors = new SKColor[width, height];
+                for (int i = 0; i < encodedColors.GetLength(0); i++)
+                {
+                    for (int j = 0; j < encodedColors.GetLength(1); j++)
+                    {
+                        encodedColors[i, j] = Converter.ByteEncode(sourceColors[i, j], inBytes[i * width + j]);
+                    }
+                }
+
+                SKBitmap bitmap = Converter.ColorsToBitmap(encodedColors, new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Opaque));
+                encodedColors = Converter.BitmapToColors(bitmap);
+
+                byte[] outBytes = new byte[width * height];
+                for (int i = 0; i < encodedColors.GetLength(0); i++)
+                {
+                    for (int j = 0; j < encodedColors.GetLength(1); j++)
+                    {
+                        outBytes[i * width + j] = Converter.ByteDecode(sourceColors[i, j], encodedColors[i, j]);
+                    }
+                }
+
+                string hash2 = Hashing.Sha256(outBytes);
+                Console.WriteLine("Out Data Hash: " + hash2);
+
+                if (hash1.Equals(hash2))
+                {
+                    Console.WriteLine("Encoding successfull");
+                }
+                else
+                {
+                    Console.WriteLine("Encoding failed");
+                }
+
                 return;
             }
 
@@ -74,6 +140,7 @@ namespace ImageStegoCoder
         private bool[,] outImageWritten;
         private RandomWrapper randomGenerator;
         private byte[] dataBytes;
+        private SKImageInfo imageInfo;
 
         private bool loadedSource;
         private bool loadedData;
@@ -100,6 +167,7 @@ namespace ImageStegoCoder
             outImageWritten = new bool[0, 0];
             randomGenerator = new RandomWrapper();
             dataBytes = new byte[0];
+            imageInfo = new SKImageInfo();
 
             loadedSource = false;
             loadedData = false;
@@ -112,6 +180,7 @@ namespace ImageStegoCoder
             //FileUtility.ReadFile(sourceImagePath, stream);
             //SKBitmap bitmap = SKBitmap.Decode(sourceImagePath);
             SKBitmap bitmap = SKBitmap.Decode(sourceImagePath);
+            imageInfo = bitmap.Info;
             sourceImageColors = Converter.BitmapToColors(bitmap);
             //outImageColors = new SKColor[sourceImageColors.GetLength(0), sourceImageColors.GetLength(1)];
             outImageColors = Converter.BitmapToColors(bitmap);
@@ -156,7 +225,7 @@ namespace ImageStegoCoder
                         int newY = (y + j) % outImageWritten.GetLength(1);
                         if (!outImageWritten[newX, newY])
                         {
-                            Console.WriteLine("Hit! (" + x + "/" + y + ") -> (" + newX + "/" + newY + ")";
+                            //Console.WriteLine("Hit! (" + x + "/" + y + ") -> (" + newX + "/" + newY + ")");
                             x = newX;
                             y = newY;
                             goto Foo;
@@ -198,6 +267,8 @@ namespace ImageStegoCoder
             {
                 WriteByte(dataBytes[i]);
             }
+            string hash = Hashing.Sha256(dataBytes);
+            Console.WriteLine("Data Hash: " + hash);
 
             hasEncoded = true;
         }
@@ -209,8 +280,13 @@ namespace ImageStegoCoder
 
             EncodeImage();
 
-            SKImage image = SKImage.FromBitmap(Converter.ColorsToBitmap(outImageColors));
-            using Stream stream = image.Encode().AsStream();
+            SKImage image = SKImage.FromBitmap(Converter.ColorsToBitmap(outImageColors, imageInfo));
+            SKData imageData = image.Encode(SKEncodedImageFormat.Png, 100);
+
+            //string hash = Hashing.Sha256(imageData.ToArray());
+            //Console.WriteLine("Out Image Hash: " + hash);
+
+            using Stream stream = imageData.AsStream();
             FileUtility.WriteFile(outImagePath, stream);
         }
     }
@@ -222,6 +298,7 @@ namespace ImageStegoCoder
         private bool[,] outImageRead;
         private RandomWrapper randomGenerator;
         private byte[] dataBytes;
+        private SKImageInfo imageInfo;
 
         private bool loadedSource;
         private bool loadedOutput;
@@ -248,6 +325,7 @@ namespace ImageStegoCoder
             outImageRead = new bool[0, 0];
             randomGenerator = new RandomWrapper();
             dataBytes = new byte[0];
+            imageInfo = new SKImageInfo();
 
             loadedSource = false;
             loadedOutput = false;
@@ -260,6 +338,7 @@ namespace ImageStegoCoder
             //FileUtility.ReadFile(sourceImagePath, stream);
             //SKBitmap bitmap = SKBitmap.Decode(stream);
             SKBitmap bitmap = SKBitmap.Decode(sourceImagePath);
+            imageInfo = bitmap.Info;
             sourceImageColors = Converter.BitmapToColors(bitmap);
             loadedSource = true;
         }
@@ -280,6 +359,11 @@ namespace ImageStegoCoder
             outImageColors = Converter.BitmapToColors(bitmap);
             outImageRead = new bool[sourceImageColors.GetLength(0), sourceImageColors.GetLength(1)];
             loadedOutput = true;
+
+            //SKImage image = SKImage.FromBitmap(Converter.ColorsToBitmap(outImageColors));
+            //SKData imageData = image.Encode();
+            //string hash = Hashing.Sha256(imageData.ToArray());
+            //Console.WriteLine("Out Image Hash: " + hash);
         }
 
         private byte ReadByte()
@@ -301,8 +385,8 @@ namespace ImageStegoCoder
                         int newY = (y + j) % outImageRead.GetLength(1);
                         if (!outImageRead[newX, newY])
                         {
-
-                            Console.WriteLine("Hit! (" + x + "/" + y + ") -> (" + newX + "/" + newY + ")";           x = newX;
+                            //Console.WriteLine("Hit! (" + x + "/" + y + ") -> (" + newX + "/" + newY + ")");           
+                            x = newX;
                             y = newY;
                             goto Foo;
                         }
@@ -345,6 +429,8 @@ namespace ImageStegoCoder
             {
                 dataBytes[i] = ReadByte();
             }
+            string hash = Hashing.Sha256(dataBytes);
+            Console.WriteLine("Data Hash: " + hash);
 
             hasDecoded = true;
         }
@@ -376,9 +462,13 @@ namespace ImageStegoCoder
             return colors;
         }
 
-        public static SKBitmap ColorsToBitmap(SKColor[,] colors)
+        public static SKBitmap ColorsToBitmap(SKColor[,] colors, SKImageInfo info)
         {
-            SKBitmap bitmap = new SKBitmap(colors.GetLength(0), colors.GetLength(1));
+            //SKColorType colorType = SKColorType.;
+            //SKAlphaType alphaType = SKAlphaType.Unpremul;
+            //SKColorSpace colorSpace = SKColorSpac
+            //SKBitmap bitmap = new SKBitmap(colors.GetLength(0), colors.GetLength(1), colorType, alphaType);
+            SKBitmap bitmap = new SKBitmap(info);
             for (int i = 0; i < bitmap.Width; i++)
             {
                 for (int j = 0; j < bitmap.Height; j++)
@@ -390,38 +480,67 @@ namespace ImageStegoCoder
             return bitmap;
         }
 
+        //public static SKColor ByteEncode(SKColor inColor, byte b)
+        //{
+        //    byte mask = 0b_0000_0011;
+        //    byte[] bytes = new byte[4];
+        //    for (int i = 0; i < bytes.Length; i++)
+        //    {
+        //        bytes[i] = (byte)(b & mask);
+        //        b = (byte)(b >> 2);
+        //    }
+        //    SKColor outColor = new SKColor(
+        //        (byte)(inColor.Red ^ bytes[0]),
+        //        (byte)(inColor.Green ^ bytes[1]),
+        //        (byte)(inColor.Blue ^ bytes[2]),
+        //        (byte)(inColor.Alpha ^ bytes[3])
+        //        );
+        //    return outColor;
+        //}
+
+        //public static byte ByteDecode(SKColor inColor, SKColor outColor)
+        //{
+        //    byte[] bytes = {
+        //        (byte)(inColor.Red ^ outColor.Red),
+        //        (byte)(inColor.Green ^ outColor.Green),
+        //        (byte)(inColor.Blue ^ outColor.Blue),
+        //        (byte)(inColor.Alpha ^ outColor.Alpha)
+        //        };
+        //    byte b = 0;
+        //    for (int i = 0; i < bytes.Length; i++)
+        //    {
+        //        b = (byte)(b << 2);
+        //        b |= bytes[bytes.Length - i - 1];
+        //    }
+        //    return b;
+        //}
+
         public static SKColor ByteEncode(SKColor inColor, byte b)
         {
-            byte mask = 0b_0000_0011;
-            byte[] bytes = new byte[4];
-            for (int i = 0; i < bytes.Length; i++)
+            byte[] bytes = new byte[]
             {
-                bytes[i] = (byte)(b & mask);
-                b = (byte)(b >> 2);
-            }
+                (byte)(b & 0b_0000_0111),
+                (byte)((b & 0b_0001_1000) >> 3),
+                (byte)((b & 0b_1110_0000) >> 5)
+            };
             SKColor outColor = new SKColor(
                 (byte)(inColor.Red ^ bytes[0]),
                 (byte)(inColor.Green ^ bytes[1]),
                 (byte)(inColor.Blue ^ bytes[2]),
-                (byte)(inColor.Alpha ^ bytes[3])
+                inColor.Alpha
                 );
             return outColor;
         }
 
         public static byte ByteDecode(SKColor inColor, SKColor outColor)
         {
-            byte[] bytes = {
-                (byte)(inColor.Red ^ outColor.Red),
-                (byte)(inColor.Green ^ outColor.Green),
-                (byte)(inColor.Blue ^ outColor.Blue),
-                (byte)(inColor.Alpha ^ outColor.Alpha)
-                };
-            byte b = 0;
-            for (int i = 0; i < bytes.Length; i++)
+            byte[] bytes = new byte[]
             {
-                b = (byte)(b << 2);
-                b |= bytes[bytes.Length - i - 1];
-            }
+                (byte)(inColor.Red ^ outColor.Red),
+                (byte)((inColor.Green ^ outColor.Green) << 3),
+                (byte)((inColor.Blue ^ outColor.Blue) << 5)
+            };
+            byte b = (byte)(bytes[0] | bytes[1] | bytes[2]);
             return b;
         }
 
@@ -523,6 +642,41 @@ namespace ImageStegoCoder
         {
             seedValue = value;
             randomGenerator = new Random(value);
+        }
+
+        public void NextBytes(byte[] bytes)
+        {
+            randomGenerator.NextBytes(bytes);
+        }
+
+        public void NextColors(SKColor[] colors)
+        {
+            byte[] bytes = new byte[4];
+            for (int i = 0; i < colors.Length; i++)
+            {
+                randomGenerator.NextBytes(bytes);
+                colors[i] = new SKColor(bytes[0], bytes[1], bytes[2], bytes[3]);
+            }
+        }
+    }
+
+    internal static class Hashing
+    {
+        private static string ByteArrayToString(byte[] arrInput)
+        {
+            int i;
+            StringBuilder sOutput = new StringBuilder(arrInput.Length);
+            for (i = 0; i < arrInput.Length; i++)
+            {
+                sOutput.Append(arrInput[i].ToString("X2"));
+            }
+            return sOutput.ToString();
+        }
+
+        public static string Sha256(byte[] arrInput)
+        {
+            byte[] hash = SHA256.Create().ComputeHash(arrInput);
+            return ByteArrayToString(hash);
         }
     }
 }
